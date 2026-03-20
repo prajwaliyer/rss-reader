@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import type { FeedItem } from "@/hooks/use-feed";
 
 const URL_REGEX = /(https?:\/\/[^\s<]+)/g;
@@ -65,7 +66,7 @@ function LinkPreview({ url }: { url: string }) {
       onClick={(e) => e.stopPropagation()}
     >
       {preview.image && (
-        <img
+        <LoadingImage
           src={preview.image}
           alt=""
           className="w-full object-cover"
@@ -163,6 +164,25 @@ function proxyUrl(url: string): string {
   return `/api/proxy?url=${encodeURIComponent(url)}`;
 }
 
+function LoadingImage(props: React.ImgHTMLAttributes<HTMLImageElement>) {
+  const [loaded, setLoaded] = useState(false);
+  return (
+    <div className="relative">
+      {!loaded && (
+        <div className="absolute inset-0 rounded-lg bg-muted animate-pulse" />
+      )}
+      <img
+        {...props}
+        onLoad={(e) => {
+          setLoaded(true);
+          props.onLoad?.(e);
+        }}
+        style={{ ...props.style, opacity: loaded ? 1 : 0, transition: "opacity 0.2s" }}
+      />
+    </div>
+  );
+}
+
 interface ParsedContent {
   mainText: string;
   mainImages: string[];
@@ -208,9 +228,20 @@ function parseContent(html: string | null): ParsedContent {
   };
 }
 
+const DISMISS_THRESHOLD = 150;
+
 function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
   const imgRef = useRef<HTMLImageElement>(null);
-  const stateRef = useRef({ scale: 1, x: 0, y: 0, startDist: 0, startScale: 1, startX: 0, startY: 0, panStartX: 0, panStartY: 0, isPanning: false });
+  const backdropRef = useRef<HTMLDivElement>(null);
+  const stateRef = useRef({
+    scale: 1, x: 0, y: 0,
+    startDist: 0, startScale: 1, startX: 0, startY: 0,
+    panStartX: 0, panStartY: 0,
+    isPanning: false, isDismissing: false,
+    dismissStartY: 0, dismissY: 0,
+    lastTapTime: 0, lastTapX: 0, lastTapY: 0,
+    isAnimating: false,
+  });
 
   const applyTransform = useCallback(() => {
     const s = stateRef.current;
@@ -218,12 +249,43 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
     if (img) img.style.transform = `translate(${s.x}px, ${s.y}px) scale(${s.scale})`;
   }, []);
 
+  const animateZoom = useCallback((toScale: number, toX: number, toY: number) => {
+    const s = stateRef.current;
+    const img = imgRef.current;
+    if (!img || s.isAnimating) return;
+    s.isAnimating = true;
+    img.style.transition = "transform 0.3s cubic-bezier(0.2, 0, 0.2, 1)";
+    s.scale = toScale;
+    s.x = toX;
+    s.y = toY;
+    img.style.transform = `translate(${toX}px, ${toY}px) scale(${toScale})`;
+    const onEnd = () => {
+      img.style.transition = "";
+      s.isAnimating = false;
+      img.removeEventListener("transitionend", onEnd);
+    };
+    img.addEventListener("transitionend", onEnd);
+  }, []);
+
+  const applyDismiss = useCallback(() => {
+    const s = stateRef.current;
+    const img = imgRef.current;
+    const backdrop = backdropRef.current;
+    const opacity = Math.max(0, 1 - Math.abs(s.dismissY) / (DISMISS_THRESHOLD * 2));
+    if (img) img.style.transform = `translateY(${s.dismissY}px) scale(${s.scale})`;
+    if (backdrop) backdrop.style.opacity = String(opacity);
+  }, []);
+
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
+    document.body.style.overflow = "hidden";
     document.addEventListener("keydown", handleKey);
-    return () => document.removeEventListener("keydown", handleKey);
+    return () => {
+      document.body.style.overflow = "";
+      document.removeEventListener("keydown", handleKey);
+    };
   }, [onClose]);
 
   const getDistance = (t1: React.Touch, t2: React.Touch) =>
@@ -238,6 +300,7 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
     e.stopPropagation();
     const s = stateRef.current;
     if (e.touches.length === 2) {
+      s.isDismissing = false;
       s.startDist = getDistance(e.touches[0], e.touches[1]);
       s.startScale = s.scale;
       const mid = getMidpoint(e.touches[0], e.touches[1]);
@@ -246,12 +309,20 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
       s.startX = s.x;
       s.startY = s.y;
       s.isPanning = false;
-    } else if (e.touches.length === 1 && s.scale > 1) {
-      s.panStartX = e.touches[0].clientX;
-      s.panStartY = e.touches[0].clientY;
-      s.startX = s.x;
-      s.startY = s.y;
-      s.isPanning = true;
+    } else if (e.touches.length === 1) {
+      if (s.scale > 1) {
+        s.panStartX = e.touches[0].clientX;
+        s.panStartY = e.touches[0].clientY;
+        s.startX = s.x;
+        s.startY = s.y;
+        s.isPanning = true;
+        s.isDismissing = false;
+      } else {
+        s.dismissStartY = e.touches[0].clientY;
+        s.dismissY = 0;
+        s.isDismissing = true;
+        s.isPanning = false;
+      }
     }
   };
 
@@ -266,16 +337,98 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
       s.x = s.startX + (mid.x - s.panStartX);
       s.y = s.startY + (mid.y - s.panStartY);
       applyTransform();
-    } else if (e.touches.length === 1 && s.isPanning && s.scale > 1) {
-      s.x = s.startX + (e.touches[0].clientX - s.panStartX);
-      s.y = s.startY + (e.touches[0].clientY - s.panStartY);
-      applyTransform();
+    } else if (e.touches.length === 1) {
+      if (s.isPanning && s.scale > 1) {
+        s.x = s.startX + (e.touches[0].clientX - s.panStartX);
+        s.y = s.startY + (e.touches[0].clientY - s.panStartY);
+        applyTransform();
+      } else if (s.isDismissing) {
+        s.dismissY = e.touches[0].clientY - s.dismissStartY;
+        applyDismiss();
+      }
     }
   };
 
   const handleTouchEnd = (e: React.TouchEvent) => {
     e.stopPropagation();
     const s = stateRef.current;
+
+    if (s.isDismissing) {
+      // Check for double-tap before handling dismiss
+      const movedDuringDismiss = Math.abs(s.dismissY) > 10;
+      if (!movedDuringDismiss && e.touches.length === 0 && e.changedTouches.length === 1) {
+        const now = Date.now();
+        const touch = e.changedTouches[0];
+        const dt = now - s.lastTapTime;
+        const dx = Math.abs(touch.clientX - s.lastTapX);
+        const dy = Math.abs(touch.clientY - s.lastTapY);
+
+        if (dt < 300 && dx < 30 && dy < 30) {
+          s.lastTapTime = 0;
+          s.isDismissing = false;
+          // Double-tap: zoom to 2x centered on tap point
+          const img = imgRef.current;
+          if (img) {
+            const rect = img.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            const tapX = touch.clientX;
+            const tapY = touch.clientY;
+            // Offset so the tapped point stays in place after 2x zoom
+            const toX = (cx - tapX) * 2;
+            const toY = (cy - tapY) * 2;
+            animateZoom(3, toX, toY);
+          }
+          return;
+        }
+        s.lastTapTime = now;
+        s.lastTapX = touch.clientX;
+        s.lastTapY = touch.clientY;
+      }
+
+      if (Math.abs(s.dismissY) > DISMISS_THRESHOLD) {
+        onClose();
+        return;
+      }
+      s.dismissY = 0;
+      s.isDismissing = false;
+      const img = imgRef.current;
+      const backdrop = backdropRef.current;
+      if (img) {
+        img.style.transition = "transform 0.2s ease";
+        img.style.transform = "translateY(0) scale(1)";
+        setTimeout(() => { if (img) img.style.transition = ""; }, 200);
+      }
+      if (backdrop) {
+        backdrop.style.transition = "opacity 0.2s ease";
+        backdrop.style.opacity = "1";
+        setTimeout(() => { if (backdrop) backdrop.style.transition = ""; }, 200);
+      }
+      return;
+    }
+
+    // Double-tap while zoomed in → zoom back to 1x
+    if (s.isPanning && e.touches.length === 0 && e.changedTouches.length === 1) {
+      const touch = e.changedTouches[0];
+      const moved = Math.abs(touch.clientX - s.panStartX) > 10 || Math.abs(touch.clientY - s.panStartY) > 10;
+      if (!moved) {
+        const now = Date.now();
+        const dt = now - s.lastTapTime;
+        const dx = Math.abs(touch.clientX - s.lastTapX);
+        const dy = Math.abs(touch.clientY - s.lastTapY);
+
+        if (dt < 300 && dx < 30 && dy < 30) {
+          s.lastTapTime = 0;
+          s.isPanning = false;
+          animateZoom(1, 0, 0);
+          return;
+        }
+        s.lastTapTime = now;
+        s.lastTapX = touch.clientX;
+        s.lastTapY = touch.clientY;
+      }
+    }
+
     s.isPanning = false;
     if (s.scale <= 1) {
       s.scale = 1;
@@ -286,22 +439,106 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 touch-none"
-      onClick={onClose}
-    >
-      <img
-        ref={imgRef}
-        src={src}
-        alt=""
-        className="max-h-[90vh] max-w-[90vw] object-contain"
-        onClick={(e) => e.stopPropagation()}
+    <div className="fixed inset-0 z-[60] touch-none">
+      <div ref={backdropRef} className="absolute inset-0 bg-black" />
+      <button
+        onClick={onClose}
+        className="absolute top-4 left-4 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/60 text-white"
+        style={{ marginTop: "env(safe-area-inset-top)" }}
+      >
+        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
+      <div
+        className="relative flex h-full w-full items-center justify-center"
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
-        draggable={false}
-      />
+      >
+        <img
+          ref={imgRef}
+          src={src}
+          alt=""
+          className="max-h-full max-w-full object-contain"
+          draggable={false}
+        />
+      </div>
     </div>
+  );
+}
+
+function SourceSettingsDialog({
+  sourceId,
+  sourceName,
+  currentMultiplier,
+  onSave,
+  onClose,
+}: {
+  sourceId: number;
+  sourceName: string | null;
+  sourceIcon: string | null;
+  currentMultiplier: string | null;
+  onSave: (sourceId: number, multiplier: string | null) => void;
+  onClose: () => void;
+}) {
+  const [multiplier, setMultiplier] = useState(currentMultiplier ?? "");
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    const val = multiplier.trim();
+    const parsed = parseFloat(val);
+    if (val && !isNaN(parsed) && parsed > 0) {
+      onSave(sourceId, val);
+    } else {
+      onSave(sourceId, null);
+    }
+    setLoading(false);
+    onClose();
+  };
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80" onClick={onClose}>
+      <div className="w-full max-w-md rounded-lg border border-border bg-background p-6 shadow-lg" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold">Edit Source</h3>
+        <form onSubmit={handleSubmit} className="mt-4 space-y-4">
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Twitter Handle</label>
+            <input
+              value={`@${sourceName ?? ""}`}
+              disabled
+              className="flex h-9 w-full rounded-md border border-input bg-muted px-3 py-1 text-sm text-muted-foreground shadow-xs"
+            />
+          </div>
+          <div className="space-y-2">
+            <label htmlFor="edit-multiplier" className="text-sm font-medium">
+              Boost Multiplier <span className="text-muted-foreground font-normal">(optional, 0.1–10)</span>
+            </label>
+            <input
+              id="edit-multiplier"
+              type="text"
+              inputMode="decimal"
+              placeholder="1"
+              value={multiplier}
+              onChange={(e) => setMultiplier(e.target.value)}
+              autoFocus
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={loading}
+            className="inline-flex w-full items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-xs hover:bg-primary/90 disabled:opacity-50"
+          >
+            {loading ? "Saving..." : "Save"}
+          </button>
+        </form>
+      </div>
+    </div>,
+    document.body
   );
 }
 
@@ -318,7 +555,7 @@ function MediaGrid({ images, videos }: { images: string[]; videos: { src: string
         {images.length > 0 && (
           <div className={`grid gap-1 ${images.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
             {images.slice(0, 4).map((src, i) => (
-              <img
+              <LoadingImage
                 key={i}
                 src={proxyUrl(src)}
                 alt=""
@@ -349,17 +586,29 @@ function MediaGrid({ images, videos }: { images: string[]; videos: { src: string
 interface FeedItemCardProps {
   item: FeedItem;
   onToggleStar: (id: number, starred: boolean) => void;
+  onSetMultiplier: (sourceId: number, multiplier: string | null) => void;
 }
 
-export function FeedItemCard({ item, onToggleStar }: FeedItemCardProps) {
+export function FeedItemCard({ item, onToggleStar, onSetMultiplier }: FeedItemCardProps) {
+  const [showSourceSettings, setShowSourceSettings] = useState(false);
   const { mainText, mainImages, mainVideos, quote } = parseContent(item.content);
   const displayText = mainText || item.title || "";
 
   return (
     <article className="border-b border-border px-4 py-3">
+      {showSourceSettings && (
+        <SourceSettingsDialog
+          sourceId={item.sourceId}
+          sourceName={item.sourceName}
+          sourceIcon={item.sourceIcon}
+          currentMultiplier={item.sourceMultiplier}
+          onSave={onSetMultiplier}
+          onClose={() => setShowSourceSettings(false)}
+        />
+      )}
       <div className="flex gap-3">
         {/* Avatar */}
-        <div className="shrink-0">
+        <div className="shrink-0 cursor-pointer" onClick={() => setShowSourceSettings(true)}>
           {item.sourceIcon ? (
             <img
               src={proxyUrl(item.sourceIcon)}

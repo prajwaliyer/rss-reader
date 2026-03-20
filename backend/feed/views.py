@@ -59,9 +59,6 @@ def items_list(request):
     if starred == "true":
         qs = qs.filter(is_starred=True)
 
-    fetch_limit = PAGE_SIZE * 5 if min_ratio else PAGE_SIZE + 1
-    results = list(qs[:fetch_limit])
-
     if min_ratio:
         ratio = float(min_ratio)
         medians = _get_source_median_scores()
@@ -92,10 +89,24 @@ def items_list(request):
 
             return score / median >= effective_ratio
 
-        results = [r for r in results if passes_filter(r)]
+        results = []
+        batch_size = PAGE_SIZE * 5
+        offset = 0
+        exhausted = False
+        while len(results) < PAGE_SIZE + 1:
+            batch = list(qs[offset:offset + batch_size])
+            if not batch:
+                exhausted = True
+                break
+            results.extend(item for item in batch if passes_filter(item))
+            offset += batch_size
 
-    has_more = len(results) > PAGE_SIZE
-    data = results[:PAGE_SIZE] if has_more else results
+    else:
+        results = list(qs[:PAGE_SIZE + 1])
+        exhausted = len(results) <= PAGE_SIZE
+
+    has_more = len(results) > PAGE_SIZE and not exhausted
+    data = results[:PAGE_SIZE]
     next_cursor = data[-1].published_at.isoformat() if has_more and data else None
 
     medians = _get_source_median_scores()
@@ -105,6 +116,7 @@ def items_list(request):
         median = medians.get(item.source_id, 1)
         score = _engagement_score(item.like_count, item.reply_count)
         d["engagementRatio"] = round(score / median, 1)
+        d["sourceMultiplier"] = item.source.custom_multiplier
         items_out.append(d)
 
     return JsonResponse({"items": items_out, "nextCursor": next_cursor})

@@ -1,6 +1,6 @@
 {
-  "name": "Reader",
-  "short_name": "Reader",
+  "name": "Feed",
+  "short_name": "Feed",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#09090b",

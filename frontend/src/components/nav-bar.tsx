@@ -1,4 +1,4 @@
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 
 const tabs = [
@@ -9,6 +9,7 @@ const tabs = [
 
 export function NavBar() {
   const { pathname } = useLocation();
+  const navigate = useNavigate();
 
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-50 border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
@@ -19,6 +20,12 @@ export function NavBar() {
             <Link
               key={tab.href}
               to={tab.href}
+              onClick={(e) => {
+                if (active) {
+                  e.preventDefault();
+                  window.scrollTo({ top: 0, behavior: "smooth" });
+                }
+              }}
               className={cn(
                 "flex flex-col items-center gap-0.5 px-4 py-1.5 text-xs transition-colors",
                 active ? "text-primary" : "text-muted-foreground"

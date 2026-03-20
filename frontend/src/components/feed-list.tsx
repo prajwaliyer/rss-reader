@@ -64,6 +64,15 @@ export function FeedList({ starred }: FeedListProps) {
     mutate();
   };
 
+  const handleSetMultiplier = async (sourceId: number, multiplier: string | null) => {
+    await fetch(`/api/sources?id=${sourceId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ customMultiplier: multiplier ? parseFloat(multiplier) : null }),
+    });
+    mutate();
+  };
+
   const handleTouchStart = (e: React.TouchEvent) => {
     if (refreshing) return;
     touchStartY.current = e.touches[0].clientY;
@@ -169,7 +178,7 @@ export function FeedList({ starred }: FeedListProps) {
         <>
           {items.map((item, index) => (
             <div key={item.id} ref={index === items.length - 1 ? lastItemRef : undefined}>
-              <FeedItemCard item={item} onToggleStar={handleToggleStar} />
+              <FeedItemCard item={item} onToggleStar={handleToggleStar} onSetMultiplier={handleSetMultiplier} />
             </div>
           ))}
           {isLoadingMore && (

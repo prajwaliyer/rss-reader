@@ -19,6 +19,7 @@ interface FeedItem {
   engagementRatio: number | null;
   sourceName: string | null;
   sourceIcon: string | null;
+  sourceMultiplier: string | null;
 }
 
 interface FeedPage {
